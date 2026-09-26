@@ -1,496 +1,393 @@
 #include <GL/glut.h>
-#include <stdlib.h>
-#include <math.h>
-#include <stdio.h>
-#include <string.h>
-#include <iostream>
-#define PI 3.14152653597689786
-#define RandomFactor 2.0
-#define ESCAPE 27
-#define TEXTID 3
-unsigned int i;
-int flag=0,f=2;
-int vflag=0;
-GLfloat xt=0.0,yt=0.0,zt=0.0;
-GLfloat xangle=0.0,yangle=0.0,zangle=0.0;
-GLfloat X[3];
-GLint ListNum;
-GLfloat OuterRadius = 2.4;
-GLfloat InnerRadius = 2.0;
-GLint NumOfVerticesStone = 6;
-GLfloat StoneHeight = 0.5;
-GLfloat WaterHeight = 0.45;
-struct SVertex
-{
-GLfloat x,y,z;
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+namespace {
+constexpr float kPi = 3.14159265358979323846f;
+constexpr float kGravity = 5.8f;
+constexpr float kPoolRadius = 2.15f;
+constexpr float kRimHeight = 0.22f;
+constexpr int kInitialParticleCount = 1400;
+
+struct Vec3 {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
 };
-class CDrop
-{
-private:
-GLfloat time;
-SVertex ConstantSpeed;
-GLfloat AccFactor;
-public:
-void SetConstantSpeed (SVertex NewSpeed);
-void SetAccFactor(GLfloat NewAccFactor);
-void SetTime(GLfloat NewTime);
-void GetNewPosition(SVertex * PositionVertex);};
-void CDrop::SetConstantSpeed(SVertex NewSpeed)
-{
-ConstantSpeed = NewSpeed;
+
+struct Particle {
+    Vec3 position;
+    Vec3 velocity;
+    float age = 0.0f;
+    float lifetime = 1.0f;
+};
+
+struct Ripple {
+    float x = 0.0f;
+    float z = 0.0f;
+    float age = 0.0f;
+    float lifetime = 0.9f;
+};
+
+std::vector<Particle> particles;
+std::vector<Ripple> ripples;
+int particleCount = kInitialParticleCount;
+int windowWidth = 1024;
+int windowHeight = 768;
+int previousFrameMs = 0;
+int previousMouseX = 0;
+int previousMouseY = 0;
+bool mouseDragging = false;
+bool paused = false;
+bool showHelp = true;
+float cameraYaw = 35.0f;
+float cameraPitch = 24.0f;
+float cameraDistance = 9.0f;
+float fountainHeight = 3.2f;
+float emitterRate = 700.0f;
+float emissionRemainder = 0.0f;
+int colorMode = 0;
+int sprayMode = 1;
+int fpsFrames = 0;
+int fpsWindowStartMs = 0;
+int displayedFps = 0;
+
+float randomRange(float minimum, float maximum) {
+    const float unit = static_cast<float>(std::rand()) / static_cast<float>(RAND_MAX);
+    return minimum + unit * (maximum - minimum);
 }
-void CDrop::SetAccFactor (GLfloat NewAccFactor)
-{
-AccFactor = NewAccFactor;
+
+void setParticleCount(int count) {
+    particleCount = std::max(200, std::min(6000, count));
+    particles.resize(static_cast<std::size_t>(particleCount));
+    for (Particle& particle : particles) {
+        particle.age = particle.lifetime;
+    }
+    emissionRemainder = 0.0f;
 }
-void CDrop::SetTime(GLfloat NewTime)
-{
-time = NewTime;
+
+void respawn(Particle& particle) {
+    const float angle = randomRange(0.0f, 2.0f * kPi);
+    float minimumSpread = 0.25f;
+    float maximumSpread = 1.35f;
+    if (sprayMode == 0) {
+        minimumSpread = 0.12f;
+        maximumSpread = 0.72f;
+    } else if (sprayMode == 2) {
+        minimumSpread = 0.75f;
+        maximumSpread = 2.15f;
+    }
+    const float horizontalSpeed = randomRange(minimumSpread, maximumSpread);
+    particle.position = {0.0f, kRimHeight + 0.04f, 0.0f};
+    const float rise = std::max(0.5f, fountainHeight - particle.position.y);
+    const float verticalSpeed = std::sqrt(2.0f * kGravity * rise) * randomRange(0.97f, 1.03f);
+    particle.velocity = {
+        std::cos(angle) * horizontalSpeed,
+        verticalSpeed,
+        std::sin(angle) * horizontalSpeed,
+    };
+    particle.age = 0.0f;
+    particle.lifetime = 2.0f * verticalSpeed / kGravity + 0.35f;
 }
-void CDrop::GetNewPosition(SVertex * PositionVertex)
-{
-SVertex Position;
-time += 0.15;
-Position.x = ConstantSpeed.x * time;
-Position.y = ConstantSpeed.y * time - AccFactor * time *time;
-Position.z = ConstantSpeed.z * time;
-PositionVertex->x = Position.x;
-PositionVertex->y = Position.y + WaterHeight;
-PositionVertex->z = Position.z;
-if (Position.y < 0.0)
-{
-time = time - int(time);
-if (time > 0.0) time -= 1.0;
+
+void resetSimulation() {
+    for (Particle& particle : particles) {
+        particle.age = particle.lifetime;
+    }
+    emissionRemainder = 0.0f;
+    ripples.clear();
 }
+
+void updateSimulation(float deltaSeconds) {
+    if (paused) return;
+
+    for (Ripple& ripple : ripples) ripple.age += deltaSeconds;
+    ripples.erase(std::remove_if(ripples.begin(), ripples.end(), [](const Ripple& ripple) {
+        return ripple.age >= ripple.lifetime;
+    }), ripples.end());
+
+    emissionRemainder += emitterRate * deltaSeconds;
+    int toEmit = static_cast<int>(emissionRemainder);
+    emissionRemainder -= static_cast<float>(toEmit);
+
+    for (Particle& particle : particles) {
+        if (particle.age >= particle.lifetime && toEmit > 0) {
+            respawn(particle);
+            --toEmit;
+        }
+        if (particle.age >= particle.lifetime) continue;
+
+        particle.age += deltaSeconds;
+        particle.velocity.y -= kGravity * deltaSeconds;
+        particle.position.x += particle.velocity.x * deltaSeconds;
+        particle.position.y += particle.velocity.y * deltaSeconds;
+        particle.position.z += particle.velocity.z * deltaSeconds;
+
+        if (particle.position.y <= kRimHeight + 0.04f) {
+            const float distanceFromCenter = std::sqrt(
+                particle.position.x * particle.position.x + particle.position.z * particle.position.z);
+            if (distanceFromCenter < kPoolRadius * 0.68f && ripples.size() < 120 &&
+                randomRange(0.0f, 1.0f) < 0.16f) {
+                ripples.push_back({particle.position.x, particle.position.z, 0.0f, randomRange(0.65f, 1.0f)});
+            }
+            particle.age = particle.lifetime;
+        }
+    }
 }
-CDrop * FountainDrops;
-SVertex * FountainVertices;
-GLint Steps = 4;
-GLint RaysPerStep =8;
-GLint DropsPerRay = 80;GLfloat DropsComplete = Steps * RaysPerStep * DropsPerRay;
-GLfloat AngleOfDeepestStep = 80;
-GLfloat AccFactor = 0.011;
-void CreateList(void)
-{
-SVertex * Vertices = new SVertex[NumOfVerticesStone*3];
-ListNum = glGenLists(1);
-for (GLint i = 0; i<NumOfVerticesStone; i++)
-{
-Vertices[i].x = cos(2.0 * PI / NumOfVerticesStone * i) * OuterRadius;
-Vertices[i].y = StoneHeight;
-Vertices[i].z = sin(2.0 * PI / NumOfVerticesStone * i) * OuterRadius;
+
+void drawText(float x, float y, const std::string& text) {
+    glRasterPos2f(x, y);
+    for (unsigned char character : text) {
+        glutBitmapCharacter(GLUT_BITMAP_8_BY_13, character);
+    }
 }
-for (i = 0; i<NumOfVerticesStone; i++)
-{
-Vertices[i + NumOfVerticesStone*1].x = cos(2.0 * PI / NumOfVerticesStone *
-i) * InnerRadius;
-Vertices[i + NumOfVerticesStone*1].y = StoneHeight;
-Vertices[i + NumOfVerticesStone*1].z = sin(2.0 * PI / NumOfVerticesStone *
-i) * InnerRadius;
+
+void drawHelp() {
+    if (!showHelp) return;
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    gluOrtho2D(0.0, static_cast<double>(windowWidth), 0.0, static_cast<double>(windowHeight));
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glDisable(GL_LIGHTING);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0.035f, 0.075f, 0.11f, 0.88f);
+    glBegin(GL_QUADS);
+    glVertex2f(16.0f, static_cast<float>(windowHeight) - 174.0f);
+    glVertex2f(485.0f, static_cast<float>(windowHeight) - 174.0f);
+    glVertex2f(485.0f, static_cast<float>(windowHeight) - 15.0f);
+    glVertex2f(16.0f, static_cast<float>(windowHeight) - 15.0f);
+    glEnd();
+    glColor3f(0.77f, 0.92f, 1.0f);
+    drawText(30.0f, static_cast<float>(windowHeight) - 38.0f, "FLOWING FOUNTAIN  |  OpenGL particle simulation");
+    drawText(30.0f, static_cast<float>(windowHeight) - 60.0f, "Drag: orbit camera    Wheel: zoom    Space: pause/resume");
+    drawText(30.0f, static_cast<float>(windowHeight) - 82.0f, "[ / ]: particles    - / +: height    C: color    M: spray style");
+    drawText(30.0f, static_cast<float>(windowHeight) - 104.0f, "R: reset    H: hide help    Esc: quit");
+    drawText(30.0f, static_cast<float>(windowHeight) - 128.0f,
+             "Pattern: " + std::string(sprayMode == 0 ? "Focused" : sprayMode == 1 ? "Classic" : "Wide") +
+                 "    FPS: " + std::to_string(displayedFps));
+    drawText(30.0f, static_cast<float>(windowHeight) - 151.0f,
+             "Particles: " + std::to_string(particleCount) + "    Height: " + std::to_string(fountainHeight).substr(0, 3) +
+                 "    " + (paused ? "PAUSED" : "LIVE"));
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_LIGHTING);
+    glDisable(GL_BLEND);
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
 }
-for (i = 0; i<NumOfVerticesStone; i++)
-{
-Vertices[i + NumOfVerticesStone*2].x = cos(2.0 * PI / NumOfVerticesStone *
-i) * OuterRadius;
-Vertices[i + NumOfVerticesStone*2].y = 0.0;
-Vertices[i + NumOfVerticesStone*2].z = sin(2.0 * PI / NumOfVerticesStone *
-i) * OuterRadius;
+
+void drawPool() {
+    const int segments = 96;
+    const float outerRadius = kPoolRadius;
+    const float innerRadius = kPoolRadius * 0.82f;
+
+    glColor3f(0.13f, 0.25f, 0.31f);
+    glBegin(GL_QUAD_STRIP);
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = 2.0f * kPi * static_cast<float>(i) / static_cast<float>(segments);
+        const float x = std::cos(angle);
+        const float z = std::sin(angle);
+        glNormal3f(x, 0.0f, z);
+        glVertex3f(x * outerRadius, 0.0f, z * outerRadius);
+        glVertex3f(x * outerRadius, kRimHeight, z * outerRadius);
+    }
+    glEnd();
+
+    glColor3f(0.56f, 0.69f, 0.68f);
+    glBegin(GL_QUAD_STRIP);
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = 2.0f * kPi * static_cast<float>(i) / static_cast<float>(segments);
+        const float x = std::cos(angle);
+        const float z = std::sin(angle);
+        glNormal3f(0.0f, 1.0f, 0.0f);
+        glVertex3f(x * innerRadius, kRimHeight, z * innerRadius);
+        glVertex3f(x * outerRadius, kRimHeight, z * outerRadius);
+    }
+    glEnd();
+
+    glColor3f(0.025f, 0.20f, 0.29f);
+    glBegin(GL_TRIANGLE_FAN);
+    glNormal3f(0.0f, 1.0f, 0.0f);
+    glVertex3f(0.0f, kRimHeight + 0.015f, 0.0f);
+    for (int i = 0; i <= segments; ++i) {
+        const float angle = 2.0f * kPi * static_cast<float>(i) / static_cast<float>(segments);
+        glVertex3f(std::cos(angle) * innerRadius, kRimHeight + 0.015f,
+                   std::sin(angle) * innerRadius);
+    }
+    glEnd();
 }
-glNewList(ListNum, GL_COMPILE);
-glBegin(GL_QUADS);
-glColor3ub(0,105,0);
-glVertex3f(-OuterRadius*10.0,0.0,OuterRadius*10.0);
-glVertex3f(-OuterRadius*10.0,0.0,-OuterRadius*10.0);
-glVertex3f(OuterRadius*10.0,0.0,-OuterRadius*10.0);
-glVertex3f(OuterRadius*10.0,0.0,OuterRadius*10.0);
-for (int j = 1; j < 3; j++)
-{if (j == 1) glColor3f(1.3,0.5,1.2);
-if (j == 2) glColor3f(0.5,0.7,1.0);
-for (i = 0; i<NumOfVerticesStone-1; i++)
-{
-glVertex3fv(&Vertices[i+NumOfVerticesStone*j].x);
-glVertex3fv(&Vertices[i].x);
-glVertex3fv(&Vertices[i+1].x);
-glVertex3fv(&Vertices[i+NumOfVerticesStone*j+1].x);
+
+void drawParticles() {
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glPointSize(3.0f);
+    if (colorMode == 0) glColor4f(0.35f, 0.78f, 1.0f, 0.82f);
+    else if (colorMode == 1) glColor4f(0.55f, 1.0f, 0.82f, 0.82f);
+    else glColor4f(0.76f, 0.65f, 1.0f, 0.82f);
+
+    glBegin(GL_POINTS);
+    for (const Particle& particle : particles) {
+        if (particle.age < particle.lifetime) {
+            glVertex3f(particle.position.x, particle.position.y, particle.position.z);
+        }
+    }
+    glEnd();
+    glDisable(GL_BLEND);
+    glEnable(GL_LIGHTING);
 }
-glVertex3fv(&Vertices[i+NumOfVerticesStone*j].x);
-glVertex3fv(&Vertices[i].x);
-glVertex3fv(&Vertices[0].x);
-glVertex3fv(&Vertices[NumOfVerticesStone*j].x);
+
+void drawRipples() {
+    if (ripples.empty()) return;
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glLineWidth(2.0f);
+    for (const Ripple& ripple : ripples) {
+        const float progress = ripple.age / ripple.lifetime;
+        const float radius = 0.08f + progress * 0.95f;
+        const float alpha = (1.0f - progress) * 0.72f;
+        if (colorMode == 0) glColor4f(0.48f, 0.84f, 1.0f, alpha);
+        else if (colorMode == 1) glColor4f(0.58f, 1.0f, 0.84f, alpha);
+        else glColor4f(0.82f, 0.72f, 1.0f, alpha);
+
+        glBegin(GL_LINE_LOOP);
+        for (int segment = 0; segment < 32; ++segment) {
+            const float angle = 2.0f * kPi * static_cast<float>(segment) / 32.0f;
+            glVertex3f(ripple.x + std::cos(angle) * radius, kRimHeight + 0.04f,
+                       ripple.z + std::sin(angle) * radius);
+        }
+        glEnd();
+    }
+    glDisable(GL_BLEND);
+    glEnable(GL_LIGHTING);
 }
-glEnd();
-glTranslatef(0.0,WaterHeight - StoneHeight, 0.0);
-glBegin(GL_POLYGON);
-for (i = 0; i<NumOfVerticesStone; i++)
-{
-glVertex3fv(&Vertices[i+NumOfVerticesStone].x);
-GLint m1,n1,p1;
-m1=rand()%255;
-n1=rand()%255;
-p1=rand()%255;
-glColor3ub(m1,n1,p1);
+
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    const float yaw = cameraYaw * kPi / 180.0f;
+    const float pitch = cameraPitch * kPi / 180.0f;
+    const float horizontal = cameraDistance * std::cos(pitch);
+    gluLookAt(horizontal * std::sin(yaw), cameraDistance * std::sin(pitch),
+              horizontal * std::cos(yaw), 0.0, 1.25, 0.0, 0.0, 1.0, 0.0);
+
+    const GLfloat lightPosition[] = {4.0f, 8.0f, 5.0f, 1.0f};
+    glLightfv(GL_LIGHT0, GL_POSITION, lightPosition);
+    drawPool();
+    drawRipples();
+    drawParticles();
+    drawHelp();
+    glutSwapBuffers();
 }
-glEnd();
-glEndList();
+
+void update(int) {
+    const int now = glutGet(GLUT_ELAPSED_TIME);
+    ++fpsFrames;
+    if (now - fpsWindowStartMs >= 1000) {
+        displayedFps = fpsFrames;
+        fpsFrames = 0;
+        fpsWindowStartMs = now;
+    }
+    float deltaSeconds = static_cast<float>(now - previousFrameMs) / 1000.0f;
+    previousFrameMs = now;
+    deltaSeconds = std::max(0.0f, std::min(deltaSeconds, 0.04f));
+    updateSimulation(deltaSeconds);
+    glutPostRedisplay();
+    glutTimerFunc(16, update, 0);
 }
-GLfloat GetRandomFloat(GLfloat range)
-{
-return (GLfloat)rand() / (GLfloat)RAND_MAX * range * RandomFactor;
+
+void reshape(int width, int height) {
+    windowWidth = std::max(width, 1);
+    windowHeight = std::max(height, 1);
+    glViewport(0, 0, windowWidth, windowHeight);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(48.0, static_cast<double>(windowWidth) / static_cast<double>(windowHeight), 0.1, 100.0);
+    glMatrixMode(GL_MODELVIEW);
 }
-void InitFountain(void)
-{
-FountainDrops = new CDrop [ (int)DropsComplete ];
-FountainVertices = new SVertex [ (int)DropsComplete ];
-SVertex NewSpeed;GLfloat DropAccFactor;
-GLfloat TimeNeeded;
-GLfloat StepAngle;
-GLfloat RayAngle;
-GLint i,j,k;
-for (k = 0; k <Steps; k++)
-{
-for (j = 0; j < RaysPerStep; j++)
-{
-for (i = 0; i < DropsPerRay; i++)
-{
-DropAccFactor = AccFactor + GetRandomFloat(0.0005);
-StepAngle = AngleOfDeepestStep + (90.0-AngleOfDeepestStep)
-* GLfloat(k) / (Steps-1) + GetRandomFloat(0.2+0.8*(Steps-k-1)/(Steps-1));
-NewSpeed.x = cos ( StepAngle * PI / 180.0) * (0.2+0.04*k);
-NewSpeed.y = sin ( StepAngle * PI / 180.0) * (0.2+0.04*k);
-RayAngle = (GLfloat)j / (GLfloat)RaysPerStep * 360.0;
-NewSpeed.z = NewSpeed.x * sin ( RayAngle * PI /180.0);
-NewSpeed.x = NewSpeed.x * cos ( RayAngle * PI /180.0);
-TimeNeeded = NewSpeed.y/ DropAccFactor;
-FountainDrops[i+j*DropsPerRay+k*DropsPerRay*RaysPerStep].SetConstantSpeed
-( NewSpeed );
-FountainDrops[i+j*DropsPerRay+k*DropsPerRay*RaysPerStep].SetAccFactor
-(DropAccFactor);
-FountainDrops[i+j*DropsPerRay+k*DropsPerRay*RaysPerStep].SetTime(TimeNeeded * i /
-DropsPerRay);
+
+void keyboard(unsigned char key, int, int) {
+    switch (key) {
+        case 27: std::exit(EXIT_SUCCESS);
+        case ' ': paused = !paused; break;
+        case 'r': case 'R': resetSimulation(); break;
+        case 'h': case 'H': showHelp = !showHelp; break;
+        case 'c': case 'C': colorMode = (colorMode + 1) % 3; break;
+        case 'm': case 'M': sprayMode = (sprayMode + 1) % 3; break;
+        case '[': setParticleCount(particleCount - 200); break;
+        case ']': setParticleCount(particleCount + 200); break;
+        case '-': case '_': fountainHeight = std::max(1.5f, fountainHeight - 0.2f); break;
+        case '+': case '=': fountainHeight = std::min(5.0f, fountainHeight + 0.2f); break;
+        default: return;
+    }
+    glutPostRedisplay();
 }
+
+void mouseButton(int button, int state, int x, int y) {
+    if (button == GLUT_LEFT_BUTTON) {
+        mouseDragging = (state == GLUT_DOWN);
+        previousMouseX = x;
+        previousMouseY = y;
+    }
+    if (button == 3 && state == GLUT_DOWN) cameraDistance = std::max(4.0f, cameraDistance - 0.5f);
+    if (button == 4 && state == GLUT_DOWN) cameraDistance = std::min(18.0f, cameraDistance + 0.5f);
+    glutPostRedisplay();
 }
+
+void mouseMotion(int x, int y) {
+    if (!mouseDragging) return;
+    cameraYaw += static_cast<float>(x - previousMouseX) * 0.35f;
+    cameraPitch += static_cast<float>(y - previousMouseY) * 0.35f;
+    cameraPitch = std::max(-5.0f, std::min(cameraPitch, 75.0f));
+    previousMouseX = x;
+    previousMouseY = y;
+    glutPostRedisplay();
 }
-glEnableClientState(GL_VERTEX_ARRAY);
-glVertexPointer( 3,
-GL_FLOAT,
-0,
-FountainVertices);
+
+void initialize() {
+    std::srand(20260926);
+    setParticleCount(kInitialParticleCount);
+    glClearColor(0.035f, 0.065f, 0.095f, 1.0f);
+    glEnable(GL_DEPTH_TEST);
+    glEnable(GL_POINT_SMOOTH);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_COLOR_MATERIAL);
+    glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+    glShadeModel(GL_SMOOTH);
+    glPointSize(3.0f);
 }
-void randcolor()
-{GLint a,b,c;
-a=rand()%101;
-b=rand()%101;
-c=rand()%101;
-X[0]=(GLfloat)a/100.0;
-X[1]=(GLfloat)b/100.0;
-X[2]=(GLfloat)c/100.0;
-}
-void DrawFountain(void)
-{
-if(flag==0)
-glColor3f(1.0,1.0,1.0);
-else if(flag==1)
-glColor3fv(X);
-else if(flag==2)
-glColor3f(1.0,1.0,1.0);
-else
-glColor3f(0.8,0.7,1.0);
-for (int i = 0; i < DropsComplete; i++)
-{
-FountainDrops[i].GetNewPosition(&FountainVertices[i]);
-}
-glDrawArrays( GL_POINTS,
-0,
-DropsComplete);
-glutPostRedisplay();
-}
-void colours(int id)
-{
-flag=id;
-if(flag==1)
-randcolor();
-glutPostRedisplay();
-}
-void flow(int id)
-{
-RaysPerStep=id;glutPostRedisplay();
-}
-void level(int id)
-{
-Steps=id;
-glutPostRedisplay();
-}
-void help(int id)
-{
-glutPostRedisplay();
-}
-void CMain(int id)
-{
-}
-void NormalKey(GLubyte key, GLint x, GLint y)
-{
-if(f==0)
-{
-switch ( key )
-{
-case 13:
-case '1': f=3; break;
-case '2': f=1; break;
-case '3':
-case '4': case 'b': f=2; break;
-case ESCAPE: exit(0);
-glutPostRedisplay();
-}
-}
-else if(f==1)
-{
-if(key=='b'||key=='B')
-f=0;
-else
-f=3;
-glutPostRedisplay();}
-else if(f==2)
-{ f=0;
-}
-else
-{
-switch ( key )
-{
-case ESCAPE :
-printf("Thank You\nAny Suggestions??????\n\n\n");
-exit(0);
-break;
-case 't': case 'T':
-vflag=3;
-glutPostRedisplay();
-break;
-case 'f': case 'F':
-vflag=33;
-glutPostRedisplay();
-break;
-case 'd': case 'D':
-vflag=2;
-glutPostRedisplay();
-break;
-case 'u': case 'U':
-vflag=22;
-glutPostRedisplay();
-break;
-case 'a': case 'A':
-vflag=1;
-glutPostRedisplay();
-break;case 'n': case 'N':
-vflag=11;
-glutPostRedisplay();
-break;
-case 'b': case 'B':
-f=0;
-glutPostRedisplay();
-break;
-case 'h': case 'H':
-f=1;
-glutPostRedisplay();
-break;
-default:
-break;
-}
-}
-}
-void DrawTextXY(double x,double y,double z,double scale,char *s)
-{
-int i;
-glPushMatrix();
-glTranslatef(x,y,z);
-glScalef(scale,scale,scale);
-for (i=0;i < strlen(s);i++)
-glutStrokeCharacter(GLUT_STROKE_MONO_ROMAN,s[i]);
-glPopMatrix();
-}
-void Display(void)
-{
-glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-glLoadIdentity();
-glClearColor(0,0,100,1.0);
-glTranslatef(0.0,0.0,-6.0);glTranslatef(0.0,-1.3,0.0);
-if(vflag==1)
-{
-zt-=0.06;
-}
-glTranslatef(xt,yt,zt);
-if(vflag==11)
-{
-zt+=0.06;
-}
-glTranslatef(xt,yt,zt);
-if(vflag==2)
-{
-yt -= 0.05;
-}
-glTranslatef(xt,yt,zt);
-if(vflag==22)
-{
-yt += 0.05;
-}
-glTranslatef(xt,yt,zt);
-if(vflag==3)
-{
-if(xangle<=80.0)
-xangle += 5.0;
-}
-if(vflag==33)
-{
-if(xangle>=-5)
-xangle -= 5.0;
-}
-glColor3f(1.0,0.0,0.0);
-glRotatef(xangle,1.0,0.0,0.0);
-vflag=0;glRotatef(45.0,0.0,1.0,0.0);
-glPushMatrix();
-glCallList(ListNum);
-glPopMatrix();
-DrawFountain();
-glFlush();
-glutSwapBuffers();
-}
-void menu1()
-{
-glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-glLoadIdentity();
-glClearColor(0,0,0,0.0);
-glTranslatef(0.0,0.0,-6.0);
-glTranslatef(0.0,-1.3,0.0);
-glColor3f(1.00,0.20,0.10);
-glLoadName(TEXTID);
-DrawTextXY(-2.7,3.5,0.0,0.003," FOUNTAIN ");
-glColor3f(0.6,0.8,0.7);
-DrawTextXY(-1.25,2.4,0.0,0.0014," MENU ");
-glColor3f(1.0,0.8,0.4);
-DrawTextXY(-1.25,2.1,0.0,0.001," 1 : PROCEED ");
-DrawTextXY(-1.25,1.9,0.0,0.001," 2 : HELP ");
-DrawTextXY(-1.25,1.7,0.0,0.001," 3 : EXIT ");
-DrawTextXY(-1.25,1.5,0.0,0.001," 4 : BACK");
-glFlush();
-glutSwapBuffers();
-}
-void menu2()
-{
-glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-glLoadIdentity();
-glClearColor(0,0,0,1.0);
-glTranslatef(0.0,0.0,-6.0);
-glTranslatef(0.0,-1.3,0.0);
-glColor3f(0.6,0.8,0.7);
-DrawTextXY(-2.7,3.5,0.0,0.003," HELP ");
-glColor3f(1.0,0.8,0.4);DrawTextXY(-1.75,2.4,0.0,0.0014," Keyboard Controls : ");
-glColor3f(0.9,0.8,0.9);
-DrawTextXY(-1.25,2.1,0.0,0.001," Move Near -> N ");
-DrawTextXY(-1.25,1.9,0.0,0.001," Move Away -> A ");
-DrawTextXY(-1.25,1.5,0.0,0.001," Move Up -> U ");
-DrawTextXY(-1.25,1.3,0.0,0.001," Move Down -> D ");
-DrawTextXY(-1.25,0.9,0.0,0.001," Top View -> T ");
-DrawTextXY(-1.25,0.7,0.0,0.001," Front View -> F ");
-DrawTextXY(-1.25,0.3,0.0,0.001," Open HELP -> H ");
-DrawTextXY(-1.25,0.1,0.0,0.001," Open MENU -> B ");
-glColor3f(0.9,0.9,0.8);
-DrawTextXY(1,-0.4,0.0,0.001," Press any KEY ... ");
-glFlush();
-glutSwapBuffers();
-}
-void cover()
-{
-glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-glLoadIdentity();
-glClearColor(0,0,0,0.0);
-glTranslatef(0.0,0.0,-6.0);
-glTranslatef(0.0,-1.3,0.0);
-glColor3f(1.00,0.20,0.10);
-glLoadName(TEXTID);
-DrawTextXY(-1.7,3.5,0.0,0.001," GRAPHICAL IMPLEMENTATION OF ");
-glColor3f(0.6,0.8,0.7);
-DrawTextXY(-1.75,3,0.0,0.0014," FLOWING FOUNTAIN ");
-glColor3f(0.7,0.6,0.1);
-DrawTextXY(-3.25,1.5,0.0,0.0007," Submitted by :- ");
-glColor3f(1.0,0.5,0.0);
-DrawTextXY(-2.5,1.2,0.0,0.001," YADUKRISHNAN T K ");
-DrawTextXY(1,1.2,0.0,0.001," GOUTHAM KRISHNA S");
-glColor3f(0.7,0.8,0.6);
-DrawTextXY(-2.5,0.95,0.0,0.001," (1TJ18CS112) ");
-DrawTextXY(1,0.95,0.0,0.001," (1TJ18CS038) ");
-glColor3f(0.7,0.6,0.1);
-DrawTextXY(-1,-.7,0.0,0.001,"T JOHN INSTITUTE OF TECHNOLOGY");
-glColor3f(0.3,0.3,0.3);
-DrawTextXY(-1,-1,0.0,0.0008," Press any key... ");
-glFlush();
-glutSwapBuffers();
-}
-void Dis()
-{
-if(f==0)
-menu1();
-else if(f==1)
-menu2();
-else if(f==2)
-cover();
-else
-Display();
-}
-void Reshape(int x, int y)
-{
-if (y == 0 || x == 0) return;
-glMatrixMode(GL_PROJECTION);
-glLoadIdentity();
-gluPerspective(50.0,(GLdouble)x/(GLdouble)y,0.10,20.0);
-glMatrixMode(GL_MODELVIEW);
-glViewport(0,0,x,y);
-glPointSize(GLfloat(x)/600.0);
-}
-int main(int argc, char **argv)
-{
-glutInit(&argc, argv);
-printf("KeyboardControls\n");
-printf("'x'-topview\n");
-printf("'d'-movedown\n");
-printf("'u'-moveup\n");
-printf("'a'-moveaway\n");printf("'n'-movenear\n");
-glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
-glutInitWindowSize(1024,768);
-glutInitWindowPosition(0,0);
-glutCreateWindow("Fountain");
-glEnable(GL_DEPTH_TEST);
-glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
-glEnable(GL_LINE_SMOOTH);
-glEnable(GL_BLEND);
-glLineWidth(2.0);
-glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-InitFountain();
-CreateList();
-glutDisplayFunc(Dis);
-glutReshapeFunc(Reshape);
-glutKeyboardFunc(NormalKey);
-int sub_menu=glutCreateMenu(colours);
-glutAddMenuEntry("RANDOM",1);
-glutAddMenuEntry("GREEN",2);
-glutAddMenuEntry("BLUE",3);
-int sub_menu2=glutCreateMenu(flow);
-glutAddMenuEntry("LOW",8);
-glutAddMenuEntry("MEDIUM",10);
-glutAddMenuEntry("HIGH",20);
-int sub_menu3=glutCreateMenu(level);
-glutAddMenuEntry("3 LEVELS",3);
-glutAddMenuEntry("4 LEVELS",4);
-glutAddMenuEntry("5 LEVELS",5);
-int sub_menu4=glutCreateMenu(help);
-glutAddMenuEntry("KEYBOARD CONTROLS:",0);
-glutAddMenuEntry("Move Near: n",1);
-glutAddMenuEntry("Move Away: a",2);
-glutAddMenuEntry("Move Down: d",3);
-glutAddMenuEntry("Move Up: u",4);
-glutAddMenuEntry("Vertical 360: x",5);
-glutAddMenuEntry("EXIT",6);
-glutCreateMenu(CMain);
-glutAddSubMenu("Colors",sub_menu);glutAddSubMenu("Help",sub_menu4);
-glutAttachMenu(GLUT_RIGHT_BUTTON);
-glutIdleFunc(Dis);
-glutMainLoop();
-return 0;
+}  // namespace
+
+int main(int argc, char** argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
+    glutInitWindowSize(windowWidth, windowHeight);
+    glutCreateWindow("Flowing Fountain | Interactive OpenGL Simulation");
+    initialize();
+    previousFrameMs = glutGet(GLUT_ELAPSED_TIME);
+    fpsWindowStartMs = previousFrameMs;
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutKeyboardFunc(keyboard);
+    glutMouseFunc(mouseButton);
+    glutMotionFunc(mouseMotion);
+    glutTimerFunc(16, update, 0);
+    glutMainLoop();
+    return EXIT_SUCCESS;
 }
