@@ -2,6 +2,8 @@
 
 An interactive 3D fountain simulation in C++ using OpenGL and GLUT. The original project is preserved as a compatibility-profile graphics application; the simulation now uses a bounded particle pool and elapsed-time updates so its motion and controls behave consistently across different frame rates.
 
+![Interactive fountain simulation showing the particle spray and pool ripples](assets/fountain-demo.png)
+
 ## Features
 
 - Water launches from the basin, rises to the selected fountain height, and falls back under gravity.
