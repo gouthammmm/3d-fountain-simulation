@@ -1,4 +1,4 @@
-# Flowing Fountain CG Project
+# 3D Fountain Simulation
 
 A computer graphics project that simulates a flowing fountain using OpenGL and GLUT.
 
